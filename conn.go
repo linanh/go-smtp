@@ -30,11 +30,11 @@ type ConnectionState struct {
 }
 
 type Conn struct {
-	conn   net.Conn
-	text   *textproto.Conn
-	server *Server
-	helo   string
-
+	conn      net.Conn
+	text      *textproto.Conn
+	server    *Server
+	helo      string
+	nbrErrors int
 	// Number of errors witnessed on this connection
 	errCount int
 
@@ -92,6 +92,16 @@ func (c *Conn) init() {
 	}
 
 	c.text = textproto.NewConn(rwc)
+}
+
+func (c *Conn) unrecognizedCommand(cmd string) {
+	c.WriteResponse(500, EnhancedCode{5, 5, 2}, fmt.Sprintf("Syntax error, %v command unrecognized", cmd))
+
+	c.nbrErrors++
+	if c.nbrErrors > 3 {
+		c.WriteResponse(500, EnhancedCode{5, 5, 2}, "Too many unrecognized commands")
+		c.Close()
+	}
 }
 
 // Commands are dispatched to the appropriate handler functions.

@@ -5,7 +5,7 @@ packages:
   - bash
   - findutils
 sources:
-  - https://github.com/emersion/go-smtp
+  - https://github.com/linanh/go-smtp
 tasks:
   - build: |
       cd go-smtp
