@@ -127,6 +127,24 @@ type Session interface {
 	Data(r io.Reader) error
 }
 
+type ProxyBackend interface {
+	// AllowProxy method is called when client uses XCLIENT command without
+	// initialized session.
+	//
+	// Backends should implement this method AND returned Session objects
+	// should implement ProxySession for XCLIENT to work correctly.
+	AllowProxy(actual, asserted ConnectionState) bool
+}
+
+type ProxySession interface {
+	// AllowProxy method is called when client uses XCLIENT command.
+	//
+	// This is similar to ProxyBackend.AllowProxy but called instead of it if
+	// Session is already created for the user. Session.Logout will be
+	// called if this function returns true.
+	AllowProxy(asserted ConnectionState) bool
+}
+
 // LMTPSession is an add-on interface for Session. It can be implemented by
 // LMTP servers to provide extra functionality.
 type LMTPSession interface {

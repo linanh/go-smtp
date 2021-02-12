@@ -14,11 +14,12 @@ import (
 )
 
 type message struct {
-	From     string
-	To       []string
-	RcptOpts []smtp.RcptOptions
-	Data     []byte
-	Opts     smtp.MailOptions
+	From      string
+	To        []string
+	RcptOpts  []smtp.RcptOptions
+	Data      []byte
+	Opts      smtp.MailOptions
+	ConnState smtp.ConnectionState
 }
 
 type backend struct {
@@ -43,9 +44,16 @@ type backend struct {
 
 	panicOnMail bool
 	userErr     error
+
+	allowProxy        bool
+	allowProxySession bool
 }
 
-func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (smtp.Session, error) {
+func (be *backend) AllowProxy(_, _ smtp.ConnectionState) bool {
+	return be.allowProxy
+}
+
+func (be *backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
 	if be.userErr != nil {
 		return &session{}, be.userErr
 	}
@@ -55,13 +63,13 @@ func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (sm
 	}
 
 	if be.implementLMTPData {
-		return &lmtpSession{&session{backend: be}}, nil
+		return &lmtpSession{&session{backend: be, state: *state}}, nil
 	}
 
 	return &session{backend: be}, nil
 }
 
-func (be *backend) AnonymousLogin(_ *smtp.ConnectionState) (smtp.Session, error) {
+func (be *backend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, error) {
 	if be.userErr != nil {
 		return &session{}, be.userErr
 	}
@@ -70,7 +78,7 @@ func (be *backend) AnonymousLogin(_ *smtp.ConnectionState) (smtp.Session, error)
 		return &lmtpSession{&session{backend: be, anonymous: true}}, nil
 	}
 
-	return &session{backend: be, anonymous: true}, nil
+	return &session{backend: be, anonymous: true, state: *state}, nil
 }
 
 type lmtpSession struct {
@@ -81,11 +89,16 @@ type session struct {
 	backend   *backend
 	anonymous bool
 
-	msg *message
+	state smtp.ConnectionState
+	msg   *message
 }
 
 func (s *session) Reset() {
 	s.msg = &message{}
+}
+
+func (s *session) AllowProxy(_ smtp.ConnectionState) bool {
+	return s.backend.allowProxySession
 }
 
 func (s *session) Logout() error {
@@ -99,6 +112,7 @@ func (s *session) Mail(from string, opts smtp.MailOptions) error {
 	s.Reset()
 	s.msg.From = from
 	s.msg.Opts = opts
+	s.msg.ConnState = s.state
 	return nil
 }
 
