@@ -238,7 +238,19 @@ func (c *Conn) State() ConnectionState {
 
 func (c *Conn) authAllowed() bool {
 	_, isTLS := c.TLSConnectionState()
-	return !c.server.AuthDisabled && (isTLS || c.server.AllowInsecureAuth)
+	canAuthResult := !c.server.AuthDisabled && (isTLS || c.server.AllowInsecureAuth)
+
+	//check secure network
+	if canAuthResult == false {
+		remoteIpStr, _, _ := net.SplitHostPort(c.State().RemoteAddr.String())
+		remoteIp := net.ParseIP(remoteIpStr)
+		for _, ipNet := range c.server.SecureNet {
+			if ipNet.Contains(remoteIp) {
+				return true
+			}
+		}
+	}
+	return canAuthResult
 }
 
 // protocolError writes errors responses and closes the connection once too many

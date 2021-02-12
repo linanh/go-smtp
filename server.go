@@ -75,6 +75,8 @@ type Server struct {
 	locker    sync.Mutex
 	listeners []net.Listener
 	conns     map[*Conn]struct{}
+	//Secure net allow no tls connection.
+	SecureNet []*net.IPNet
 }
 
 // New creates a new SMTP server.
