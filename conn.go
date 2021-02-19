@@ -312,6 +312,8 @@ func (c *Conn) handleGreet(enhanced bool, arg string) {
 		}
 		if c.server.MaxMessageBytes > 0 {
 			caps = append(caps, fmt.Sprintf("SIZE %v", c.server.MaxMessageBytes))
+		} else {
+			caps = append(caps, "SIZE")
 		}
 		if _, ok := c.server.Backend.(ProxyBackend); ok {
 			// We list fields we can convert into ConnectionState plus PROTO that does not really matter in practice.
