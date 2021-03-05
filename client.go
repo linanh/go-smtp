@@ -12,11 +12,13 @@ import (
 	"io"
 	"net"
 	"net/textproto"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/emersion/go-sasl"
+	"github.com/txthinking/socks5"
 )
 
 // A Client represents a client connection to an SMTP server.
@@ -54,6 +56,29 @@ type Client struct {
 // The addr must include a port, as in "mail.example.com:smtp".
 func Dial(addr string) (*Client, error) {
 	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	return NewClient(conn, host)
+}
+
+// DialWithSocks5 returns a new Client connected to an SMTP server via socks5 proxy at addr.
+// The addr must include a port, as in "mail.example.com:smtp".
+// The socks5URI must include username and password, as in "user:pass@127.0.0.1:1080"
+func DialWithSocks5(addr string, socks5URI string) (*Client, error) {
+	u, err := url.Parse(socks5URI)
+	if err != nil {
+		return nil, err
+	}
+	username := u.User.Username()
+	password, _ := u.User.Password()
+	socksClient, err := socks5.NewClient(u.Host, username, password, 60, 60)
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := socksClient.Dial("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
