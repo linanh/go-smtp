@@ -3,6 +3,7 @@ package smtp
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-sasl"
+	"github.com/throttled/throttled/v2"
 )
 
 var errTCPAndLMTP = errors.New("smtp: cannot start LMTP server listening on a TCP socket")
@@ -77,6 +79,9 @@ type Server struct {
 	conns     map[*Conn]struct{}
 	//Secure net allow no tls connection.
 	SecureNet []*net.IPNet
+
+	//Rate Limiter
+	RateLimiter throttled.RateLimiter
 }
 
 // New creates a new SMTP server.
@@ -134,6 +139,20 @@ func (s *Server) Serve(l net.Listener) error {
 }
 
 func (s *Server) handleConn(c *Conn) error {
+	//Check rate limit
+	if s.RateLimiter != nil {
+		remoteIPStr, _, _ := net.SplitHostPort(c.conn.RemoteAddr().String())
+		limited, result, _ := s.RateLimiter.RateLimit(remoteIPStr, 1)
+		//exceeds the rate limit
+		if limited {
+			msg := fmt.Sprintf("Too many SMTP sessions for this host, please retry after %d seconds", result.RetryAfter/time.Second)
+			s.ErrorLog.Printf("the connections of ip %s exceeds the rate limit %d", remoteIPStr, result.Limit)
+			c.WriteResponse(421, EnhancedCode{4, 7, 28}, msg)
+			c.Close()
+			return nil
+		}
+	}
+
 	s.locker.Lock()
 	s.conns[c] = struct{}{}
 	s.locker.Unlock()
