@@ -241,12 +241,12 @@ func (c *Conn) authAllowed() bool {
 	canAuthResult := !c.server.AuthDisabled && (isTLS || c.server.AllowInsecureAuth)
 
 	//check secure network
-	if canAuthResult == false {
-		remoteIpStr, _, _ := net.SplitHostPort(c.State().RemoteAddr.String())
-		remoteIp := net.ParseIP(remoteIpStr)
-		for _, ipNet := range c.server.SecureNet {
-			if ipNet.Contains(remoteIp) {
-				return true
+	if !canAuthResult {
+		if addr, ok := c.State().RemoteAddr.(*net.TCPAddr); ok {
+			for _, ipNet := range c.server.SecureNet {
+				if ipNet.Contains(addr.IP) {
+					return true
+				}
 			}
 		}
 	}
@@ -635,8 +635,8 @@ func (c *Conn) handleAuth(arg string) {
 		return
 	}
 
-	if _, isTLS := c.TLSConnectionState(); !isTLS && !c.server.AllowInsecureAuth {
-		c.WriteResponse(523, EnhancedCode{5, 7, 10}, "TLS is required")
+	if !c.authAllowed() {
+		c.WriteResponse(523, EnhancedCode{5, 7, 10}, "Secure connection is required")
 		return
 	}
 
