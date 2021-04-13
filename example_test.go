@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/emersion/go-sasl"
+	"github.com/google/uuid"
 	"github.com/linanh/go-smtp"
+	"go.uber.org/zap"
 )
 
 func ExampleDial() {
@@ -93,7 +95,7 @@ func ExampleSendMail() {
 type Backend struct{}
 
 // Login handles a login command with username and password.
-func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
+func (bkd *Backend) Login(state *smtp.ConnectionState, username, password, sid string) (smtp.Session, error) {
 	if username != "username" || password != "password" {
 		return nil, errors.New("Invalid username or password")
 	}
@@ -101,8 +103,12 @@ func (bkd *Backend) Login(state *smtp.ConnectionState, username, password string
 }
 
 // AnonymousLogin requires clients to authenticate using SMTP AUTH before sending emails
-func (bkd *Backend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, error) {
+func (bkd *Backend) AnonymousLogin(state *smtp.ConnectionState, sid string) (smtp.Session, error) {
 	return nil, smtp.ErrAuthRequired
+}
+
+func (bkd *Backend) GenerateSID() string {
+	return uuid.NewString()
 }
 
 // A Session is returned after successful login.
@@ -136,7 +142,11 @@ func (s *Session) Logout() error {
 func ExampleNewServer() {
 	be := &Backend{}
 
-	s := smtp.NewServer(be)
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+	sugar := logger.Sugar()
+
+	s := smtp.NewServer(be, sugar)
 
 	s.Addr = ":1025"
 	s.Domain = "localhost"

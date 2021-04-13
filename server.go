@@ -5,26 +5,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
-	"os"
 	"sync"
 	"time"
 
 	"github.com/emersion/go-sasl"
 	"github.com/throttled/throttled/v2"
+	"go.uber.org/zap"
 )
 
 var errTCPAndLMTP = errors.New("smtp: cannot start LMTP server listening on a TCP socket")
 
 // A function that creates SASL servers.
 type SaslServerFactory func(conn *Conn) sasl.Server
-
-// Logger interface is used by Server to report unexpected internal errors.
-type Logger interface {
-	Printf(format string, v ...interface{})
-	Println(v ...interface{})
-}
 
 // A SMTP server.
 type Server struct {
@@ -43,7 +36,7 @@ type Server struct {
 	AllowInsecureAuth bool
 	Strict            bool
 	Debug             io.Writer
-	ErrorLog          Logger
+	Logger            *zap.SugaredLogger
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 
@@ -85,15 +78,15 @@ type Server struct {
 }
 
 // New creates a new SMTP server.
-func NewServer(be Backend) *Server {
+func NewServer(be Backend, logger *zap.SugaredLogger) *Server {
 	return &Server{
 		// Doubled maximum line length per RFC 5321 (Section 4.5.3.1.6)
 		MaxLineLength: 2000,
 
-		Backend:  be,
-		done:     make(chan struct{}, 1),
-		ErrorLog: log.New(os.Stderr, "smtp/server ", log.LstdFlags),
-		caps:     []string{"PIPELINING", "8BITMIME", "ENHANCEDSTATUSCODES", "CHUNKING"},
+		Backend: be,
+		done:    make(chan struct{}, 1),
+		Logger:  logger,
+		caps:    []string{"PIPELINING", "8BITMIME", "ENHANCEDSTATUSCODES", "CHUNKING"},
 		auths: map[string]SaslServerFactory{
 			sasl.Plain: func(conn *Conn) sasl.Server {
 				return sasl.NewPlainServer(func(identity, username, password string) error {
@@ -102,7 +95,7 @@ func NewServer(be Backend) *Server {
 					}
 
 					state := conn.State()
-					session, err := be.Login(&state, username, password)
+					session, err := be.Login(&state, username, password, conn.sid)
 					if err != nil {
 						return err
 					}
@@ -139,14 +132,19 @@ func (s *Server) Serve(l net.Listener) error {
 }
 
 func (s *Server) handleConn(c *Conn) error {
+	//Log connect addr
+	c.sid = s.Backend.GenerateSID()
+	addr := c.conn.RemoteAddr().String()
+	s.Logger.Infof("smtp/server sid=%s addr=%s connected", c.sid, addr)
+
 	//Check rate limit
 	if s.RateLimiter != nil {
-		remoteIPStr, _, _ := net.SplitHostPort(c.conn.RemoteAddr().String())
+		remoteIPStr, _, _ := net.SplitHostPort(addr)
 		limited, result, _ := s.RateLimiter.RateLimit(remoteIPStr, 1)
 		//exceeds the rate limit
 		if limited {
 			msg := fmt.Sprintf("Too many SMTP sessions for this host, please retry after %d seconds", result.RetryAfter/time.Second)
-			s.ErrorLog.Printf("the connections of ip %s exceeds the rate limit %d", remoteIPStr, result.Limit)
+			s.Logger.Infof("smtp/server sid=%s reject: the connections of ip=%s exceeds ratelimit=%d", c.sid, remoteIPStr, result.Limit)
 			c.WriteResponse(421, EnhancedCode{4, 7, 28}, msg)
 			c.Close()
 			return nil

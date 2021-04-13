@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/linanh/go-smtp"
+	"go.uber.org/zap"
 )
 
 var addr = "127.0.0.1:1025"
@@ -17,12 +18,16 @@ func init() {
 
 type backend struct{}
 
-func (bkd *backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
+func (bkd *backend) Login(state *smtp.ConnectionState, username, password, sid string) (smtp.Session, error) {
 	return &session{}, nil
 }
 
-func (bkd *backend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, error) {
+func (bkd *backend) AnonymousLogin(state *smtp.ConnectionState, sid string) (smtp.Session, error) {
 	return &session{}, nil
+}
+
+func (bkd *backend) GenerateSID() string {
+	return ""
 }
 
 type session struct{}
@@ -48,7 +53,11 @@ func (s *session) Logout() error {
 func main() {
 	flag.Parse()
 
-	s := smtp.NewServer(&backend{})
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+	sugar := logger.Sugar()
+
+	s := smtp.NewServer(&backend{}, sugar)
 
 	s.Addr = addr
 	s.Domain = "localhost"

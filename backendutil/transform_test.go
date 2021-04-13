@@ -10,8 +10,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/linanh/go-smtp"
 	"github.com/linanh/go-smtp/backendutil"
+	"go.uber.org/zap"
 )
 
 var _ smtp.Backend = &backendutil.TransformBackend{}
@@ -29,7 +31,7 @@ type backend struct {
 	userErr error
 }
 
-func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (smtp.Session, error) {
+func (be *backend) Login(_ *smtp.ConnectionState, username, password, sid string) (smtp.Session, error) {
 	if be.userErr != nil {
 		return &session{}, be.userErr
 	}
@@ -40,12 +42,16 @@ func (be *backend) Login(_ *smtp.ConnectionState, username, password string) (sm
 	return &session{backend: be}, nil
 }
 
-func (be *backend) AnonymousLogin(_ *smtp.ConnectionState) (smtp.Session, error) {
+func (be *backend) AnonymousLogin(_ *smtp.ConnectionState, sid string) (smtp.Session, error) {
 	if be.userErr != nil {
 		return &session{}, be.userErr
 	}
 
 	return &session{backend: be, anonymous: true}, nil
+}
+
+func (be *backend) GenerateSID() string {
+	return uuid.NewString()
 }
 
 type session struct {
@@ -121,7 +127,12 @@ func testServer(t *testing.T, fn ...serverConfigureFunc) (be *backend, s *smtp.S
 		TransformRcpt: transformMailString,
 		TransformData: transformMailReader,
 	}
-	s = smtp.NewServer(tbe)
+
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+	sugar := logger.Sugar()
+
+	s = smtp.NewServer(tbe, sugar)
 	s.Domain = "localhost"
 	s.AllowInsecureAuth = true
 	for _, f := range fn {

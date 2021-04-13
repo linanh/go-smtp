@@ -3,6 +3,7 @@ package backendutil
 import (
 	"io"
 
+	"github.com/google/uuid"
 	"github.com/linanh/go-smtp"
 )
 
@@ -16,8 +17,8 @@ type TransformBackend struct {
 }
 
 // Login implements the smtp.Backend interface.
-func (be *TransformBackend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
-	s, err := be.Backend.Login(state, username, password)
+func (be *TransformBackend) Login(state *smtp.ConnectionState, username, password, sid string) (smtp.Session, error) {
+	s, err := be.Backend.Login(state, username, password, sid)
 	if err != nil {
 		return nil, err
 	}
@@ -25,12 +26,16 @@ func (be *TransformBackend) Login(state *smtp.ConnectionState, username, passwor
 }
 
 // AnonymousLogin implements the smtp.Backend interface.
-func (be *TransformBackend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, error) {
-	s, err := be.Backend.AnonymousLogin(state)
+func (be *TransformBackend) AnonymousLogin(state *smtp.ConnectionState, sid string) (smtp.Session, error) {
+	s, err := be.Backend.AnonymousLogin(state, sid)
 	if err != nil {
 		return nil, err
 	}
 	return &transformSession{s, be}, nil
+}
+
+func (be *TransformBackend) GenerateSID() string {
+	return uuid.NewString()
 }
 
 type transformSession struct {

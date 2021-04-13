@@ -5,12 +5,13 @@ import (
 	"errors"
 	"io"
 	"io/ioutil"
-	"log"
 	"net"
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/linanh/go-smtp"
+	"go.uber.org/zap"
 )
 
 type message struct {
@@ -49,11 +50,11 @@ type backend struct {
 	allowProxySession bool
 }
 
-func (be *backend) AllowProxy(_, _ smtp.ConnectionState) bool {
+func (be *backend) AllowProxy(_, _ smtp.ConnectionState, sid string) bool {
 	return be.allowProxy
 }
 
-func (be *backend) Login(state *smtp.ConnectionState, username, password string) (smtp.Session, error) {
+func (be *backend) Login(state *smtp.ConnectionState, username, password, sid string) (smtp.Session, error) {
 	if be.userErr != nil {
 		return &session{}, be.userErr
 	}
@@ -69,7 +70,7 @@ func (be *backend) Login(state *smtp.ConnectionState, username, password string)
 	return &session{backend: be}, nil
 }
 
-func (be *backend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, error) {
+func (be *backend) AnonymousLogin(state *smtp.ConnectionState, sid string) (smtp.Session, error) {
 	if be.userErr != nil {
 		return &session{}, be.userErr
 	}
@@ -79,6 +80,10 @@ func (be *backend) AnonymousLogin(state *smtp.ConnectionState) (smtp.Session, er
 	}
 
 	return &session{backend: be, anonymous: true, state: *state}, nil
+}
+
+func (be *backend) GenerateSID() string {
+	return uuid.NewString()
 }
 
 type lmtpSession struct {
@@ -97,7 +102,7 @@ func (s *session) Reset() {
 	s.msg = &message{}
 }
 
-func (s *session) AllowProxy(_ smtp.ConnectionState) bool {
+func (s *session) AllowProxy(_ smtp.ConnectionState, sid string) bool {
 	return s.backend.allowProxySession
 }
 
@@ -186,7 +191,10 @@ func testServer(t *testing.T, fn ...serverConfigureFunc) (be *backend, s *smtp.S
 	}
 
 	be = new(backend)
-	s = smtp.NewServer(be)
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+	sugar := logger.Sugar()
+	s = smtp.NewServer(be, sugar)
 	s.Domain = "localhost"
 	s.AllowInsecureAuth = true
 	for _, f := range fn {
@@ -336,7 +344,9 @@ func TestServerPanicRecover(t *testing.T) {
 
 	s.Backend.(*backend).panicOnMail = true
 	// Don't log panic in tests to not confuse people who run 'go test'.
-	s.ErrorLog = log.New(ioutil.Discard, "", 0)
+	logger := zap.NewNop()
+	defer logger.Sync()
+	s.Logger = logger.Sugar()
 
 	io.WriteString(c, "MAIL FROM:<alice@wonderland.book>\r\n")
 	scanner.Scan()
@@ -743,7 +753,11 @@ func testStrictServer(t *testing.T) (s *smtp.Server, c net.Conn, scanner *bufio.
 		t.Fatal(err)
 	}
 
-	s = smtp.NewServer(new(backend))
+	logger, _ := zap.NewProduction()
+	defer logger.Sync()
+	sugar := logger.Sugar()
+
+	s = smtp.NewServer(new(backend), sugar)
 	s.Domain = "localhost"
 	s.AllowInsecureAuth = true
 	s.AuthDisabled = true

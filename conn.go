@@ -53,6 +53,9 @@ type Conn struct {
 	// We store ConnectionState built from XCLIENT command as multiple commands can be sent with
 	// different fields.
 	xclientState *ConnectionState
+
+	// connection unique id
+	sid string
 }
 
 func newConn(c net.Conn, s *Server) *Conn {
@@ -95,11 +98,14 @@ func (c *Conn) init() {
 }
 
 func (c *Conn) unrecognizedCommand(cmd string) {
-	c.WriteResponse(500, EnhancedCode{5, 5, 2}, fmt.Sprintf("Syntax error, %v command unrecognized", cmd))
+	errMsg := fmt.Sprintf("Syntax error, %v command unrecognized", cmd)
+	c.WriteResponse(500, EnhancedCode{5, 5, 2}, errMsg)
+	c.server.Logger.Infof("smtp/server sid=%s reject: %s", c.sid, errMsg)
 
 	c.nbrErrors++
 	if c.nbrErrors > 3 {
 		c.WriteResponse(500, EnhancedCode{5, 5, 2}, "Too many unrecognized commands")
+		c.server.Logger.Infof("smtp/server sid=%s reject: too many unrecognized commands", c.sid)
 		c.Close()
 	}
 }
@@ -114,12 +120,13 @@ func (c *Conn) handle(cmd string, arg string) {
 			c.Close()
 
 			stack := debug.Stack()
-			c.server.ErrorLog.Printf("panic serving %v: %v\n%s", c.State().RemoteAddr, err, stack)
+			c.server.Logger.Errorf("smtp/server sid=%s panic: %v\n%s", c.sid, err, stack)
 		}
 	}()
 
 	if cmd == "" {
 		c.protocolError(500, EnhancedCode{5, 5, 2}, "Error: bad syntax")
+		c.server.Logger.Infof("smtp/server sid=%s reject: bad syntax", c.sid)
 		return
 	}
 
@@ -127,15 +134,19 @@ func (c *Conn) handle(cmd string, arg string) {
 	switch cmd {
 	case "SEND", "SOML", "SAML", "EXPN", "HELP", "TURN":
 		// These commands are not implemented in any state
-		c.WriteResponse(502, EnhancedCode{5, 5, 1}, fmt.Sprintf("%v command not implemented", cmd))
+		errMsg := fmt.Sprintf("%v command not implemented", cmd)
+		c.server.Logger.Infof("smtp/server sid=%s reject: %s", c.sid, errMsg)
+		c.WriteResponse(502, EnhancedCode{5, 5, 1})
 	case "HELO", "EHLO", "LHLO":
 		lmtp := cmd == "LHLO"
 		enhanced := lmtp || cmd == "EHLO"
 		if c.server.LMTP && !lmtp {
+			c.server.Logger.Infof("smtp/server sid=%s reject: this is a LMTP server, use LHLO", c.sid)
 			c.WriteResponse(500, EnhancedCode{5, 5, 1}, "This is a LMTP server, use LHLO")
 			return
 		}
 		if !c.server.LMTP && lmtp {
+			c.server.Logger.Infof("smtp/server sid=%s reject: this is not a LMTP server", c.sid)
 			c.WriteResponse(500, EnhancedCode{5, 5, 1}, "This is not a LMTP server")
 			return
 		}
@@ -162,6 +173,7 @@ func (c *Conn) handle(cmd string, arg string) {
 		c.Close()
 	case "AUTH":
 		if c.server.AuthDisabled {
+			c.server.Logger.Infof("smtp/server sid=%s reject: syntax error, AUTH command unrecognized", c.sid)
 			c.protocolError(500, EnhancedCode{5, 5, 2}, "Syntax error, AUTH command unrecognized")
 		} else {
 			c.handleAuth(arg)
@@ -170,6 +182,7 @@ func (c *Conn) handle(cmd string, arg string) {
 		c.handleStartTLS()
 	default:
 		msg := fmt.Sprintf("Syntax errors, %v command unrecognized", cmd)
+		c.server.Logger.Infof("smtp/server sid=%s reject: %s", c.sid, msg)
 		c.protocolError(500, EnhancedCode{5, 5, 2}, msg)
 	}
 }
@@ -257,9 +270,9 @@ func (c *Conn) authAllowed() bool {
 // have occurred.
 func (c *Conn) protocolError(code int, ec EnhancedCode, msg string) {
 	c.WriteResponse(code, ec, msg)
-
 	c.errCount++
 	if c.errCount > errThreshold {
+		c.server.Logger.Infof("smtp/server sid=%s reject: too many errors, close connection", c.sid)
 		c.WriteResponse(500, EnhancedCode{5, 5, 1}, "Too many errors. Quiting now")
 		c.Close()
 	}
@@ -270,6 +283,7 @@ func (c *Conn) handleGreet(enhanced bool, arg string) {
 	if !enhanced {
 		domain, err := parseHelloArgument(arg)
 		if err != nil {
+			c.server.Logger.Infof("smtp/server sid=%s reject: HELO error", c.sid)
 			c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Domain/address argument required for HELO")
 			return
 		}
@@ -279,6 +293,7 @@ func (c *Conn) handleGreet(enhanced bool, arg string) {
 	} else {
 		domain, err := parseHelloArgument(arg)
 		if err != nil {
+			c.server.Logger.Infof("smtp/server sid=%s reject: EHLO error", c.sid)
 			c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Domain/address argument required for EHLO")
 			return
 		}
@@ -331,17 +346,19 @@ func (c *Conn) handleGreet(enhanced bool, arg string) {
 // READY state -> waiting for MAIL
 func (c *Conn) handleMail(arg string) {
 	if c.helo == "" {
+		c.server.Logger.Infof("smtp/server sid=%s reject: MAIL not allowed before HELO/EHLO", c.sid)
 		c.WriteResponse(502, EnhancedCode{2, 5, 1}, "Please introduce yourself first.")
 		return
 	}
 	if c.bdatPipe != nil {
+		c.server.Logger.Infof("smtp/server sid=%s reject: MAIL not allowed during BDAT pipe", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "MAIL not allowed during message transfer")
 		return
 	}
 
 	if c.Session() == nil {
 		state := c.State()
-		session, err := c.server.Backend.AnonymousLogin(&state)
+		session, err := c.server.Backend.AnonymousLogin(&state, c.sid)
 		if err != nil {
 			if smtpErr, ok := err.(*SMTPError); ok {
 				c.WriteResponse(smtpErr.Code, smtpErr.EnhancedCode, smtpErr.Message)
@@ -355,18 +372,21 @@ func (c *Conn) handleMail(arg string) {
 	}
 
 	if len(arg) < 6 || strings.ToUpper(arg[0:5]) != "FROM:" {
+		c.server.Logger.Infof("smtp/server sid=% reject: MAIL arg=%s syntax", c.sid, arg)
 		c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Was expecting MAIL arg syntax of FROM:<address>")
 		return
 	}
 	fromArgs := strings.Split(strings.Trim(arg[5:], " "), " ")
 	if c.server.Strict {
 		if !strings.HasPrefix(fromArgs[0], "<") || !strings.HasSuffix(fromArgs[0], ">") {
+			c.server.Logger.Infof("smtp/server sid=%s reject: MAIL arg=%s syntax", c.sid, fromArgs)
 			c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Was expecting MAIL arg syntax of FROM:<address>")
 			return
 		}
 	}
 	from := fromArgs[0]
 	if from == "" {
+		c.server.Logger.Infof("smtp/server sid=%s reject: MAIL FROM arg empty", c.sid)
 		c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Was expecting MAIL arg syntax of FROM:<address>")
 		return
 	}
@@ -380,6 +400,7 @@ func (c *Conn) handleMail(arg string) {
 	if len(fromArgs) > 1 {
 		args, err := parseArgs(fromArgs[1:])
 		if err != nil {
+			c.server.Logger.Infof("smtp/server sid=%s reject: unable to parse MAIL ESMTP parameters", c.sid)
 			c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Unable to parse MAIL ESMTP parameters")
 			return
 		}
@@ -389,11 +410,13 @@ func (c *Conn) handleMail(arg string) {
 			case "SIZE":
 				size, err := strconv.ParseInt(value, 10, 32)
 				if err != nil {
+					c.server.Logger.Infof("smtp/server sid=%s reject: unable to parse SIZE as an integer", c.sid)
 					c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Unable to parse SIZE as an integer")
 					return
 				}
 
 				if c.server.MaxMessageBytes > 0 && int(size) > c.server.MaxMessageBytes {
+					c.server.Logger.Infof("smtp/server sid=%s reject: max message size=%d exceeded", c.sid, size)
 					c.WriteResponse(552, EnhancedCode{5, 3, 4}, "Max message size exceeded")
 					return
 				}
@@ -401,12 +424,14 @@ func (c *Conn) handleMail(arg string) {
 				opts.Size = int(size)
 			case "SMTPUTF8":
 				if !c.server.EnableSMTPUTF8 {
+					c.server.Logger.Infof("smtp/server sid=%s reject: SMTPUTF8 is not implemented", c.sid)
 					c.WriteResponse(504, EnhancedCode{5, 5, 4}, "SMTPUTF8 is not implemented")
 					return
 				}
 				opts.UTF8 = true
 			case "REQUIRETLS":
 				if !c.server.EnableREQUIRETLS {
+					c.server.Logger.Infof("smtp/server sid=%s reject: REQUIRETLS is not implemented", c.sid)
 					c.WriteResponse(504, EnhancedCode{5, 5, 4}, "REQUIRETLS is not implemented")
 					return
 				}
@@ -415,12 +440,14 @@ func (c *Conn) handleMail(arg string) {
 				switch value {
 				case "BINARYMIME":
 					if !c.server.EnableBINARYMIME {
+						c.server.Logger.Infof("smtp/server sid=%s reject: BINARYMIME is not implemented", c.sid)
 						c.WriteResponse(504, EnhancedCode{5, 5, 4}, "BINARYMIME is not implemented")
 						return
 					}
 					c.binarymime = true
 				case "7BIT", "8BITMIME":
 				default:
+					c.server.Logger.Infof("smtp/server sid=%s reject: Unknown BODY value", c.sid)
 					c.WriteResponse(500, EnhancedCode{5, 5, 4}, "Unknown BODY value")
 					return
 				}
@@ -428,14 +455,17 @@ func (c *Conn) handleMail(arg string) {
 			case "AUTH":
 				value, err := decodeXtext(value)
 				if err != nil {
+					c.server.Logger.Infof("smtp/server sid=%s reject: malformed AUTH parameter value", c.sid)
 					c.WriteResponse(500, EnhancedCode{5, 5, 4}, "Malformed AUTH parameter value")
 					return
 				}
 				if !strings.HasPrefix(value, "<") {
+					c.server.Logger.Infof("smtp/server sid=%s reject: missing opening angle bracket", c.sid)
 					c.WriteResponse(500, EnhancedCode{5, 5, 4}, "Missing opening angle bracket")
 					return
 				}
 				if !strings.HasSuffix(value, ">") {
+					c.server.Logger.Infof("smtp/server sid=%s reject: missing closing angle bracket", c.sid)
 					c.WriteResponse(500, EnhancedCode{5, 5, 4}, "Missing closing angle bracket")
 					return
 				}
@@ -444,6 +474,7 @@ func (c *Conn) handleMail(arg string) {
 			case "RET":
 				value := DSNReturn(strings.ToUpper(value))
 				if value != ReturnFull && value != ReturnHeaders {
+					c.server.Logger.Infof("smtp/server sid=%s reject: missing closing angle bracket", c.sid)
 					c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Unsupported RET value")
 					return
 				}
@@ -451,15 +482,18 @@ func (c *Conn) handleMail(arg string) {
 			case "ENVID":
 				value, err := decodeXtext(value)
 				if err != nil {
+					c.server.Logger.Infof("smtp/server sid=%s reject: malformed xtext in ENVID", c.sid)
 					c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Malformed xtext in ENVID")
 					return
 				}
 				if !checkPrintableASCII(value) {
+					c.server.Logger.Infof("smtp/server sid=%s reject: only printable ASCII allowed in ENVID", c.sid)
 					c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Only printable ASCII allowed in ENVID")
 					return
 				}
 				opts.EnvelopeID = value
 			default:
+				c.server.Logger.Infof("smtp/server sid=%s reject: unknown MAIL FROM argument", c.sid)
 				c.WriteResponse(500, EnhancedCode{5, 5, 4}, "Unknown MAIL FROM argument")
 				return
 			}
@@ -542,33 +576,39 @@ func checkPrintableASCII(s string) bool {
 // MAIL state -> waiting for RCPTs followed by DATA
 func (c *Conn) handleRcpt(arg string) {
 	if !c.fromReceived {
+		c.server.Logger.Infof("smtp/server sid=%s reject: missing MAIL FROM command", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Missing MAIL FROM command.")
 		return
 	}
 	if c.bdatPipe != nil {
+		c.server.Logger.Infof("smtp/server sid=%s reject: RCPT not allowed during message transfer", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "RCPT not allowed during message transfer")
 		return
 	}
 
 	if len(arg) < 4 || strings.ToUpper(arg[0:3]) != "TO:" {
+		c.server.Logger.Infof("smtp/server sid=%s reject: RCPT TO arg=%s syntax error", c.sid, arg)
 		c.WriteResponse(501, EnhancedCode{5, 5, 1}, "Was expecting TO arg syntax of TO:<address>")
 		return
 	}
 	toArgs := strings.Split(strings.Trim(arg[3:], " "), " ")
 	if c.server.Strict {
 		if !strings.HasPrefix(toArgs[0], "<") || !strings.HasSuffix(toArgs[0], ">") {
+			c.server.Logger.Infof("smtp/server sid=%s reject: RCPT TO arg=%s syntax error", c.sid, arg)
 			c.WriteResponse(501, EnhancedCode{5, 5, 1}, "Was expecting TO arg syntax of TO:<address>")
 			return
 		}
 	}
 	recipient := toArgs[0]
 	if recipient == "" {
-		c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Was expecting MAIL arg syntax of FROM:<address>")
+		c.server.Logger.Infof("smtp/server sid=%s reject: missing RCPT TO parameter", c.sid)
+		c.WriteResponse(501, EnhancedCode{5, 5, 2}, "Was expecting RCPT TO arg syntax of TO:<address>")
 		return
 	}
 	recipient = strings.Trim(recipient, "<>")
 
 	if c.server.MaxRecipients > 0 && len(c.recipients) >= c.server.MaxRecipients {
+		c.server.Logger.Infof("smtp/server sid=%s reject: recipients max-limit=%d reached", c.sid, c.server.MaxRecipients)
 		c.WriteResponse(552, EnhancedCode{5, 5, 3}, fmt.Sprintf("Maximum limit of %v recipients reached", c.server.MaxRecipients))
 		return
 	}
@@ -578,6 +618,7 @@ func (c *Conn) handleRcpt(arg string) {
 	if len(toArgs) > 1 {
 		args, err := parseArgs(toArgs[1:])
 		if err != nil {
+			c.server.Logger.Infof("smtp/server sid=%s reject: unable to parse TO ESMTP parameters", c.sid)
 			c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Unable to parse TO ESMTP parameters")
 			return
 		}
@@ -590,17 +631,20 @@ func (c *Conn) handleRcpt(arg string) {
 				seenFlags := make(map[string]struct{})
 				for _, f := range notifyFlags {
 					if _, ok := seenFlags[f]; ok {
+						c.server.Logger.Infof("smtp/server sid=%s reject: NOTIFY parameters cannot be specified multiple times", c.sid)
 						c.WriteResponse(501, EnhancedCode{5, 5, 4}, "NOTIFY parameters cannot be specified multiple times")
 						return
 					}
 					switch DSNNotify(f) {
 					case NotifyNever:
 						if len(notifyFlags) != 1 {
+							c.server.Logger.Infof("smtp/server sid=%s reject: NOTIFY=NEVER cannot be combined with other options", c.sid)
 							c.WriteResponse(501, EnhancedCode{5, 5, 4}, "NOTIFY=NEVER cannot be combined with other options")
 							return
 						}
 					case NotifyDelayed, NotifySuccess, NotifyFailure:
 					default:
+						c.server.Logger.Infof("smtp/server sid=%s reject: unknown NOTIFY parameter", c.sid)
 						c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Unknown NOTIFY parameter")
 						return
 					}
@@ -625,17 +669,20 @@ func (c *Conn) handleRcpt(arg string) {
 
 func (c *Conn) handleAuth(arg string) {
 	if c.helo == "" {
+		c.server.Logger.Infof("smtp/server sid=%s reject: AUTH not allowed before HELO/EHLO", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Please introduce yourself first.")
 		return
 	}
 
 	parts := strings.Fields(arg)
 	if len(parts) == 0 {
+		c.server.Logger.Infof("smtp/server sid=%s reject: missing AUTH parameter", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Missing parameter")
 		return
 	}
 
 	if !c.authAllowed() {
+		c.server.Logger.Infof("smtp/server sid=%s reject: unsecure connection", c.sid)
 		c.WriteResponse(523, EnhancedCode{5, 7, 10}, "Secure connection is required")
 		return
 	}
@@ -654,6 +701,7 @@ func (c *Conn) handleAuth(arg string) {
 
 	newSasl, ok := c.server.auths[mechanism]
 	if !ok {
+		c.server.Logger.Infof("smtp/server sid=%s reject: unsupported authentication mechanism", c.sid)
 		c.WriteResponse(504, EnhancedCode{5, 7, 4}, "Unsupported authentication mechanism")
 		return
 	}
@@ -688,6 +736,7 @@ func (c *Conn) handleAuth(arg string) {
 		}
 
 		if encoded == "*" {
+			c.server.Logger.Infof("smtp/server sid=%s reject: unsupported AUTH encoded", c.sid)
 			// https://tools.ietf.org/html/rfc4954#page-4
 			c.WriteResponse(501, EnhancedCode{5, 0, 0}, "Negotiation cancelled")
 			return
@@ -695,6 +744,7 @@ func (c *Conn) handleAuth(arg string) {
 
 		response, err = base64.StdEncoding.DecodeString(encoded)
 		if err != nil {
+			c.server.Logger.Infof("smtp/server sid=%s softreject: invalid base64 data during AUTH", c.sid)
 			c.WriteResponse(454, EnhancedCode{4, 7, 0}, "Invalid base64 data")
 			return
 		}
@@ -707,11 +757,13 @@ func (c *Conn) handleAuth(arg string) {
 
 func (c *Conn) handleStartTLS() {
 	if _, isTLS := c.TLSConnectionState(); isTLS {
+		c.server.Logger.Infof("smtp/server sid=%s reject: already running in TLS", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Already running in TLS")
 		return
 	}
 
 	if c.server.TLSConfig == nil {
+		c.server.Logger.Infof("smtp/server sid=%s reject: STARTTLS not supported", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "TLS not supported")
 		return
 	}
@@ -722,7 +774,7 @@ func (c *Conn) handleStartTLS() {
 	tlsConn := tls.Server(c.conn, c.server.TLSConfig)
 
 	if err := tlsConn.Handshake(); err != nil {
-		c.server.ErrorLog.Printf("TLS handshake error for %s: %v", c.conn.RemoteAddr(), err)
+		c.server.Logger.Warnf("smtp/server sid=%s reject: TLS handshake error %v", c.sid, err)
 		c.WriteResponse(550, EnhancedCode{5, 0, 0}, "Handshake error")
 	}
 
@@ -743,20 +795,24 @@ func (c *Conn) handleStartTLS() {
 // DATA
 func (c *Conn) handleData(arg string) {
 	if arg != "" {
+		c.server.Logger.Infof("smtp/server sid=%s reject: DATA should not have any arguments", c.sid)
 		c.WriteResponse(501, EnhancedCode{5, 5, 4}, "DATA command should not have any arguments")
 		return
 	}
 	if c.bdatPipe != nil {
+		c.server.Logger.Infof("smtp/server sid=%s reject: DATA not allowed during message transfer", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "DATA not allowed during message transfer")
 		return
 	}
 	if c.binarymime {
+		c.server.Logger.Infof("smtp/server sid=%s reject: DATA not allowed for BINARYMIME messages", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "DATA not allowed for BINARYMIME messages")
 		return
 	}
 
 	if !c.fromReceived || len(c.recipients) == 0 {
-		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Missing RCPT TO command.")
+		c.server.Logger.Infof("smtp/server sid=%s reject: DATA missing RCPT TO command", c.sid)
+		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Missing RCPT TO command")
 		return
 	}
 
@@ -780,22 +836,26 @@ func (c *Conn) handleData(arg string) {
 func (c *Conn) handleBdat(arg string) {
 	args := strings.Fields(arg)
 	if len(args) == 0 {
+		c.server.Logger.Infof("smtp/server sid=%s reject: BDAT missing chunk size argument", c.sid)
 		c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Missing chunk size argument")
 		return
 	}
 	if len(args) > 2 {
+		c.server.Logger.Infof("smtp/server sid=%s reject: BDAT too many arguments", c.sid)
 		c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Too many arguments")
 		return
 	}
 
 	if !c.fromReceived || len(c.recipients) == 0 {
-		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Missing RCPT TO command.")
+		c.server.Logger.Infof("smtp/server sid=%s reject: BDAT missing RCPT TO command", c.sid)
+		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "Missing RCPT TO command")
 		return
 	}
 
 	last := false
 	if len(args) == 2 {
 		if !strings.EqualFold(args[1], "LAST") {
+			c.server.Logger.Infof("smtp/server sid=%s reject: unknown BDAT argument", c.sid)
 			c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Unknown BDAT argument")
 			return
 		}
@@ -805,11 +865,13 @@ func (c *Conn) handleBdat(arg string) {
 	// ParseUint instead of Atoi so we will not accept negative values.
 	size, err := strconv.ParseUint(args[0], 10, 32)
 	if err != nil {
+		c.server.Logger.Infof("smtp/server sid=%s reject: BDAT malformed size argument", c.sid)
 		c.WriteResponse(501, EnhancedCode{5, 5, 4}, "Malformed size argument")
 		return
 	}
 
 	if c.server.MaxMessageBytes != 0 && c.bytesReceived+int(size) > c.server.MaxMessageBytes {
+		c.server.Logger.Infof("smtp/server sid=%s reject: BDAT message size=%d exceeded %d", c.sid, c.bytesReceived+int(size), c.server.MaxMessageBytes)
 		c.WriteResponse(552, EnhancedCode{5, 3, 4}, "Max message size exceeded")
 
 		// Discard chunk itself without passing it to backend.
@@ -833,7 +895,6 @@ func (c *Conn) handleBdat(arg string) {
 			defer func() {
 				if err := recover(); err != nil {
 					c.handlePanic(err, c.bdatStatus)
-
 					c.dataResult <- errPanic
 					r.CloseWithError(errPanic)
 				}
@@ -865,6 +926,8 @@ func (c *Conn) handleBdat(arg string) {
 		// Backend might return an error early using CloseWithError without consuming
 		// the whole chunk.
 		io.Copy(ioutil.Discard, chunk)
+
+		c.server.Logger.Warnf("smtp/server sid=%s reject: BDAT %s", c.sid, err.Error())
 
 		c.WriteResponse(toSMTPStatus(err))
 
@@ -920,7 +983,7 @@ func (c *Conn) handlePanic(err interface{}, status *statusCollector) {
 	}
 
 	stack := debug.Stack()
-	c.server.ErrorLog.Printf("panic serving %v: %v\n%s", c.State().RemoteAddr, err, stack)
+	c.server.Logger.Errorf("smtp/server sid=%s panic: %v\n%s", c.sid, err, stack)
 }
 
 func (c *Conn) createStatusCollector() *statusCollector {
@@ -1013,7 +1076,7 @@ func (c *Conn) handleDataLMTP() {
 					})
 
 					stack := debug.Stack()
-					c.server.ErrorLog.Printf("panic serving %v: %v\n%s", c.State().RemoteAddr, err, stack)
+					c.server.Logger.Errorf("smtp/server sid=%s panic: %v\n%s", c.sid, err, stack)
 					done <- false
 				}
 			}()
@@ -1049,6 +1112,7 @@ func toSMTPStatus(err error) (code int, enchCode EnhancedCode, msg string) {
 }
 
 func (c *Conn) Reject() {
+	c.server.Logger.Infof("smtp/server sid=%s softreject: too busy", c.sid)
 	c.WriteResponse(421, EnhancedCode{4, 4, 5}, "Too busy. Try again later.")
 	c.Close()
 }
@@ -1122,6 +1186,7 @@ func (c *Conn) handleXclient(arg string) {
 		return
 	}
 	if c.fromReceived {
+		c.server.Logger.Infof("smtp/server sid=%s reject: XCLIENT not allowed during message transfer", c.sid)
 		c.WriteResponse(502, EnhancedCode{5, 5, 1}, "XCLIENT not allowed during message transfer")
 		return
 	}
@@ -1139,12 +1204,14 @@ func (c *Conn) handleXclient(arg string) {
 	for _, kv := range args {
 		kvSplit := strings.SplitN(kv, "=", 2)
 		if len(kvSplit) == 1 {
+			c.server.Logger.Infof("smtp/server sid=%s reject: malformed XCLIENT argument", c.sid)
 			c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Malformed XCLIENT argument")
 			return
 		}
 		key := kvSplit[0]
 		value, err := decodeXtext(kvSplit[1])
 		if err != nil {
+			c.server.Logger.Infof("smtp/server sid=%s reject: malformed XCLIENT argument (invalid xtext encoding)", c.sid)
 			c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Malformed XCLIENT argument (invalid xtext encoding)")
 			return
 		}
@@ -1155,6 +1222,7 @@ func (c *Conn) handleXclient(arg string) {
 
 		switch key := strings.ToUpper(key); key {
 		case "NAME", "LOGIN":
+			c.server.Logger.Infof("smtp/server sid=%s reject: malformed XCLIENT argument (unknown attribute)", c.sid)
 			c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Malformed XCLIENT argument (unknown attribute)")
 			return
 		case "ADDR", "DESTADDR":
@@ -1163,6 +1231,7 @@ func (c *Conn) handleXclient(arg string) {
 			}
 			ip := net.ParseIP(value)
 			if ip == nil {
+				c.server.Logger.Infof("smtp/server sid=%s reject: malformed XCLIENT argument (invalid IP address)", c.sid)
 				c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Malformed XCLIENT argument (invalid IP address)")
 				return
 			}
@@ -1174,6 +1243,7 @@ func (c *Conn) handleXclient(arg string) {
 		case "PORT", "DESTPORT":
 			port, err := strconv.Atoi(value)
 			if err != nil || port < 0 || port > 65535 {
+				c.server.Logger.Infof("smtp/server sid=%s reject: malformed XCLIENT argument (invalid port)", c.sid)
 				c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Malformed XCLIENT argument (invalid port)")
 				return
 			}
@@ -1187,6 +1257,7 @@ func (c *Conn) handleXclient(arg string) {
 		case "HELO":
 			connState.Hostname = value
 		default:
+			c.server.Logger.Infof("smtp/server sid=%s reject: malformed XCLIENT argumentt (unknown attribute)", c.sid)
 			c.WriteResponse(502, EnhancedCode{5, 5, 4}, "Malformed XCLIENT argument (unknown attribute)")
 			return
 		}
@@ -1208,7 +1279,9 @@ func (c *Conn) handleXclient(arg string) {
 		// We safely check ProxyBackend before and require backends to implement both or none.
 		se := c.session.(ProxySession)
 
-		if !se.AllowProxy(*connState) {
+		if !se.AllowProxy(*connState, c.sid) {
+			c.server.Logger.Infof("smtp/server sid=%s reject: addr=%s xclient-addr=%s not permitted",
+				c.sid, c.conn.RemoteAddr().String(), connState.RemoteAddr.String())
 			c.WriteResponse(550, EnhancedCode{5, 7, 0}, "XCLIENT not permitted")
 			return
 		}
@@ -1216,7 +1289,9 @@ func (c *Conn) handleXclient(arg string) {
 		c.session.Logout()
 		c.session = nil
 	} else {
-		if !be.AllowProxy(c.State(), *connState) {
+		if !be.AllowProxy(c.State(), *connState, c.sid) {
+			c.server.Logger.Infof("smtp/server sid=%s reject: addr=%s xclient-addr=%s not permitted",
+				c.sid, c.conn.RemoteAddr().String(), connState.RemoteAddr.String())
 			c.WriteResponse(550, EnhancedCode{5, 7, 0}, "XCLIENT not permitted")
 			return
 		}
@@ -1240,4 +1315,7 @@ func (c *Conn) handleXclient(arg string) {
 	c.recipients = nil
 	c.greet()
 	c.helo = ""
+
+	c.server.Logger.Infof("smtp/server sid=%s addr=%s xclient-addr=%s connected",
+		c.sid, c.conn.RemoteAddr().String(), connState.RemoteAddr.String())
 }

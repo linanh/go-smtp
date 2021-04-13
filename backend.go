@@ -14,11 +14,14 @@ var (
 type Backend interface {
 	// Authenticate a user. Return smtp.ErrAuthUnsupported if you don't want to
 	// support this.
-	Login(state *ConnectionState, username, password string) (Session, error)
+	Login(state *ConnectionState, username, password, sid string) (Session, error)
 
 	// Called if the client attempts to send mail without logging in first.
 	// Return smtp.ErrAuthRequired if you don't want to support this.
-	AnonymousLogin(state *ConnectionState) (Session, error)
+	AnonymousLogin(state *ConnectionState, sid string) (Session, error)
+
+	// Generate session unique id
+	GenerateSID() string
 }
 
 type BodyType string
@@ -133,7 +136,7 @@ type ProxyBackend interface {
 	//
 	// Backends should implement this method AND returned Session objects
 	// should implement ProxySession for XCLIENT to work correctly.
-	AllowProxy(actual, asserted ConnectionState) bool
+	AllowProxy(actual, asserted ConnectionState, sid string) bool
 }
 
 type ProxySession interface {
@@ -142,7 +145,7 @@ type ProxySession interface {
 	// This is similar to ProxyBackend.AllowProxy but called instead of it if
 	// Session is already created for the user. Session.Logout will be
 	// called if this function returns true.
-	AllowProxy(asserted ConnectionState) bool
+	AllowProxy(asserted ConnectionState, sid string) bool
 }
 
 // LMTPSession is an add-on interface for Session. It can be implemented by
