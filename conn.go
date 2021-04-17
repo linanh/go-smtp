@@ -291,7 +291,7 @@ func (c *Conn) handleGreet(enhanced bool, arg string) {
 		}
 		c.helo = domain
 
-		c.WriteResponse(250, EnhancedCode{2, 0, 0}, fmt.Sprintf("Hello %s", domain))
+		c.WriteResponse(250, EnhancedCode{2, 0, 0}, c.server.Domain)
 	} else {
 		domain, err := parseHelloArgument(arg)
 		if err != nil {
@@ -339,7 +339,7 @@ func (c *Conn) handleGreet(enhanced bool, arg string) {
 			caps = append(caps, "XCLIENT ADDR PORT DESTADDR DESTPORT HELO PROTO")
 		}
 
-		args := []string{"Hello " + domain}
+		args := []string{c.server.Domain}
 		args = append(args, caps...)
 		c.WriteResponse(250, NoEnhancedCode, args...)
 	}
@@ -776,7 +776,7 @@ func (c *Conn) handleStartTLS() {
 	tlsConn := tls.Server(c.conn, c.server.TLSConfig)
 
 	if err := tlsConn.Handshake(); err != nil {
-		c.server.Logger.Warnf("smtp/server sid=%s reject: TLS handshake error %v", c.sid, err)
+		c.server.Logger.Infof("smtp/server sid=%s reject: TLS handshake error %v", c.sid, err)
 		c.WriteResponse(550, EnhancedCode{5, 0, 0}, "Handshake error")
 	}
 
