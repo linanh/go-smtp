@@ -138,7 +138,7 @@ func (c *Conn) handle(cmd string, arg string) {
 		// These commands are not implemented in any state
 		errMsg := fmt.Sprintf("%v command not implemented", cmd)
 		c.server.Logger.Infof("smtp/server sid=%s reject: %s", c.sid, errMsg)
-		c.WriteResponse(502, EnhancedCode{5, 5, 1})
+		c.WriteResponse(502, EnhancedCode{5, 5, 1}, errMsg)
 	case "HELO", "EHLO", "LHLO":
 		lmtp := cmd == "LHLO"
 		enhanced := lmtp || cmd == "EHLO"
