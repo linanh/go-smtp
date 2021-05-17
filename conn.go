@@ -684,7 +684,7 @@ func (c *Conn) handleAuth(arg string) {
 	}
 
 	if !c.authAllowed() {
-		c.server.Logger.Infof("smtp/server sid=%s reject: unsecure connection", c.sid)
+		c.server.Logger.Infof("smtp/server sid=%s reject: auth on insecure connection", c.sid)
 		c.WriteResponse(523, EnhancedCode{5, 7, 10}, "Secure connection is required")
 		return
 	}
